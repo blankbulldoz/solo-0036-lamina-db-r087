@@ -64,10 +64,32 @@ func lex(sql string) ([]token, error) {
 			out = append(out, token{sql[start:i], false, start})
 			continue
 		}
-		if c == '-' || c >= '0' && c <= '9' {
+		if c == '-' || c == '+' || c >= '0' && c <= '9' {
 			i++
+			digits := 0
+			if c >= '0' && c <= '9' {
+				digits++
+			}
 			for i < len(sql) && sql[i] >= '0' && sql[i] <= '9' {
 				i++
+				digits++
+			}
+			if i < len(sql) && sql[i] == '.' {
+				if digits == 0 {
+					return nil, fmt.Errorf("decimal point requires digits at byte %d", start)
+				}
+				i++
+				frac := 0
+				for i < len(sql) && sql[i] >= '0' && sql[i] <= '9' {
+					i++
+					frac++
+				}
+				if frac == 0 {
+					return nil, fmt.Errorf("decimal point requires a following digit at byte %d", start)
+				}
+			}
+			if digits == 0 {
+				return nil, fmt.Errorf("sign requires a digit at byte %d", start)
 			}
 			out = append(out, token{sql[start:i], false, start})
 			continue

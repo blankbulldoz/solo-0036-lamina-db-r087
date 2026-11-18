@@ -6,7 +6,10 @@ import (
 	"lamina/internal/datum"
 )
 
-func Bind(r catalog.Relation, q Request) error {
+// Bind validates a request against the relation and rewrites every literal
+// into the declared column domain. Predicate values therefore denote exactly
+// the same facts as stored and indexed values, including decimal scale.
+func Bind(r catalog.Relation, q *Request) error {
 	if q.Limit < 0 || q.Limit > 10000 {
 		return fmt.Errorf("limit must be 0..10000")
 	}
@@ -26,7 +29,8 @@ func Bind(r catalog.Relation, q Request) error {
 			return fmt.Errorf("unknown ordering %s", o.Column)
 		}
 	}
-	for _, p := range q.Where {
+	for i := range q.Where {
+		p := &q.Where[i]
 		c, ok := r.Column(p.Column)
 		if !ok {
 			return fmt.Errorf("unknown predicate %s", p.Column)
@@ -36,9 +40,14 @@ func Bind(r catalog.Relation, q Request) error {
 		default:
 			return fmt.Errorf("unsupported comparison %s", p.Op)
 		}
-		if p.Op != "is_null" && p.Op != "not_null" && !p.Value.Null() && p.Value.Kind != c.Type {
-			return fmt.Errorf("predicate type mismatch for %s", p.Column)
+		if p.Op == "is_null" || p.Op == "not_null" || p.Value.Null() {
+			continue
 		}
+		coerced, err := c.Coerce(p.Value, false)
+		if err != nil {
+			return fmt.Errorf("predicate type mismatch for %s: %w", p.Column, err)
+		}
+		p.Value = coerced
 	}
 	if a := q.Aggregate; a != nil {
 		if a.Function != "count" && a.Function != "sum" {
@@ -46,15 +55,15 @@ func Bind(r catalog.Relation, q Request) error {
 		}
 		if a.Column == "*" || a.Column == "" {
 			if a.Function != "count" {
-				return fmt.Errorf("sum needs integer column")
+				return fmt.Errorf("sum needs numeric column")
 			}
 		} else {
 			c, ok := r.Column(a.Column)
 			if !ok {
 				return fmt.Errorf("unknown aggregate column")
 			}
-			if a.Function == "sum" && c.Type != "int" {
-				return fmt.Errorf("sum requires integer column")
+			if a.Function == "sum" && c.Type != "int" && c.Type != "decimal" {
+				return fmt.Errorf("sum requires int or decimal column")
 			}
 		}
 	}

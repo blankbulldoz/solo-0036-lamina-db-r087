@@ -19,11 +19,27 @@ go build -o bin/laminad ./cmd/laminad
 python3 examples/walkthrough.py --workflow all
 ```
 
-该命令启动临时实例，执行 14 条真实生产入口工作流，输出逐条观测 JSON，最后关闭实例并删除本次临时目录。可用 `--workflow query-plan` 等方式只运行一条。它是有界运行演示，不是基线测试套件。测试代码和自动化测试基础设施有意留待后续工作，本基线 `testing=deferred`。
+该命令启动临时实例，执行 15 条真实生产入口工作流，输出逐条观测 JSON，最后关闭实例并删除本次临时目录。可用 `--workflow query-plan` 等方式只运行一条。它是有界运行演示，不是基线测试套件。测试代码和自动化测试基础设施有意留待后续工作，本基线 `testing=deferred`。
+
+## 十进制类型
+
+`decimal` 列声明 `precision`（系数总位数，1..18）、`scale`（小数位，0..precision）与可选 `rounding`。数据库内部把它保存为整数系数加固定小数位，从输入到比较、索引、日志、镜像和聚合都不经过二进制浮点数。
+
+```json
+{"name":"amount","type":"decimal","precision":18,"scale":4,"rounding":"half_even","nullable":true}
+```
+
+- 输入可以用带小数的 JSON 数字（`0.3`）、单引号 SQL 数字（`1.50`）或字符串（`"1.50"`）表示；JSON 数字按字面量精确解析，指数写法被拒绝。
+- `rounding` 默认 `reject`：不能精确落入声明精度和小数位就拒绝，绝不静默丢失数字。`half_even`、`half_up`、`truncate` 是显式声明，只作用于小数位超出部分；舍入导致的进位若超出 `precision`（例如 `decimal(3,2)` 的 `9.999`）视为溢出错误。
+- 值始终按声明的小数位显示（`decimal(18,4)` 的 `0.2` 输出 `"0.2000"`）。主键和唯一索引按数值身份比较：`1.5`、`1.50`、`1.500` 是同一个键，只会有一行。因此 decimal 主键必须使用 `reject`，身份不能依赖舍入。
+- `sum(decimal_column)` 用整数系数精确累计，不做浮点中间值，也不截断中间精度；结果以该列声明的小数位输出。超出 18 位可表示范围时报溢出错误。整数列的 `sum` 语义保持不变。
+- 查询谓词与 SQL 字面量先在列域内解析（与入库同一套舍入/拒绝规则），再做比较和索引候选选择。因此同一数值的不同写法在 `=`、范围查询和唯一约束中都是同一事实；对 `reject` 列写出需要舍入的字面量会被拒绝，而不是被静默改写。
+- 恢复、备份还原和日志重放按原值重新校验声明域，只接受精确表示；不会因重放而重新舍入。
+
 
 ## 一个事务
 
-所有业务接口前缀为 `/v1/lamina`，JSON 标量仅支持有符号 64 位整数、文本、布尔值和 null。
+所有业务接口前缀为 `/v1/lamina`，JSON 标量支持有符号 64 位整数、文本、布尔值、null，以及以字符串或精确小数字面量表示的 `decimal`。
 
 ```sh
 curl -s http://127.0.0.1:7386/v1/lamina/relations -H 'Content-Type: application/json' -d '{"name":"spectra","primary":"sample","columns":[{"name":"sample","type":"int"},{"name":"band","type":"text"},{"name":"amplitude","type":"int","nullable":true}]}'
@@ -52,7 +68,7 @@ curl -s http://127.0.0.1:7386/v1/lamina/sql -H 'Content-Type: application/json' 
 
 数据库提供快照隔离和同键 first-committer-wins，不承诺串行化、谓词锁或跨行写偏差防护。提交前对最终可见状态检查所有受影响关系的唯一索引；一次事务内可以置换唯一值。失败提交会关闭该事务，不发布任何私有行。只读事务通过 `{"read_only":true}` 开始。
 
-SQL 只支持单条 SELECT：投影或 `count(*)`、`count(column)`、`sum(integer_column)`，可选 WHERE AND、ORDER BY、LIMIT。字符串使用单引号，内部单引号写两次；关键字及未引号标识符转为小写。没有 JOIN、GROUP BY、别名、表达式、SQL DDL/DML。语义检查与结构化查询共用绑定和执行。`sum` 忽略 null，空输入返回 null，溢出报错；`count(column)` 忽略 null，`count(*)` 计算全部匹配行。
+SQL 只支持单条 SELECT：投影或 `count(*)`、`count(column)`、`sum(integer_column)`、`sum(decimal_column)`，可选 WHERE AND、ORDER BY、LIMIT。字符串使用单引号，内部单引号写两次；关键字及未引号标识符转为小写。没有 JOIN、GROUP BY、别名、表达式、SQL DDL/DML。语义检查与结构化查询共用绑定和执行。`sum` 忽略 null，空输入返回 null，溢出报错；整数列求和保持 64 位整数结果，decimal 列求和按声明小数位输出精确结果；`count(column)` 忽略 null，`count(*)` 计算全部匹配行。
 
 ## 索引
 

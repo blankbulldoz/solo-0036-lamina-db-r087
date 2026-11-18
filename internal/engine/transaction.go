@@ -126,11 +126,11 @@ func (d *DB) Delete(id, table string, value datum.Value) error {
 	if r.Created > tx.Snapshot {
 		return fault("conflict", "relation outside transaction catalog snapshot")
 	}
-	col, _ := r.Column(r.Primary)
-	if value.Null() || value.Kind != col.Type {
-		return fault("invalid", "invalid primary value")
+	keyValue, err := r.CoercePrimary(value)
+	if err != nil {
+		return fault("invalid", "%s", err)
 	}
-	key := value.Key()
+	key := keyValue.Key()
 	if tx.writes[table] == nil {
 		tx.writes[table] = map[string]staged{}
 	}

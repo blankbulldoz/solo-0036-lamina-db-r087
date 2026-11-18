@@ -7,13 +7,13 @@
       "id": "datum",
       "name": "datum",
       "path": "internal/datum",
-      "responsibility": "typed scalar comparison, null, canonical tuple keys"
+      "responsibility": "typed scalar comparison, exact fixed-point decimals, null, canonical tuple keys"
     },
     {
       "id": "catalog",
       "name": "catalog",
       "path": "internal/catalog",
-      "responsibility": "immutable relation schemas, index definitions and normalization"
+      "responsibility": "immutable relation schemas with declared decimal domains, index definitions and normalization"
     },
     {
       "id": "versions",
@@ -219,6 +219,38 @@
       "success": "concurrent writes and atomic abort produces a verified domain result",
       "failure": "no partial commit or sequence advance on conflict",
       "verification": "python3 examples/walkthrough.py --workflow txn-conflict"
+    },
+    {
+      "id": "decimal-exact",
+      "name": "declared-precision exact decimal",
+      "entry": "POST /relations; /transactions/{tx}/put; /sql; /query",
+      "steps": [
+        "transport",
+        "catalog",
+        "datum",
+        "engine",
+        "versions",
+        "index",
+        "journal",
+        "query",
+        "syntax",
+        "snapshot"
+      ],
+      "module_ids": [
+        "transport",
+        "catalog",
+        "datum",
+        "engine",
+        "versions",
+        "index",
+        "journal",
+        "query",
+        "syntax",
+        "snapshot"
+      ],
+      "success": "declared precision, rounding and exact aggregation agree across ingest, SQL, structured query and an independent oracle",
+      "failure": "different spellings of one value share identity; out-of-domain or overflowing values are rejected",
+      "verification": "python3 examples/walkthrough.py --workflow decimal-exact"
     },
     {
       "id": "restart",

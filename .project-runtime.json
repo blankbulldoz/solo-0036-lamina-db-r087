@@ -36,6 +36,10 @@
       "command": "python3 examples/walkthrough.py --workflow txn-conflict"
     },
     {
+      "workflow_id": "decimal-exact",
+      "command": "python3 examples/walkthrough.py --workflow decimal-exact"
+    },
+    {
       "workflow_id": "restart",
       "command": "python3 examples/walkthrough.py --workflow restart"
     },

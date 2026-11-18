@@ -99,16 +99,21 @@ func Validate(image Image) error {
 			if len(chain) == 0 {
 				return fmt.Errorf("empty version chain")
 			}
-			for _, v := range chain {
+			for i := range chain {
+				v := &chain[i]
 				if v.Sequence <= last || v.Sequence > image.Sequence || v.Sequence <= r.Created {
 					return fmt.Errorf("invalid version order")
 				}
 				last = v.Sequence
 				if !v.Deleted {
-					row, err := r.Normalize(v.Row)
+					row, err := r.NormalizeStored(v.Row)
 					if err != nil || r.Key(row) != key {
 						return fmt.Errorf("invalid stored tuple")
 					}
+					// The wire form of a decimal is its exact text. Reinstall
+					// the typed row so restored state and the source instance
+					// interpret the value identically.
+					v.Row = row
 				}
 			}
 		}

@@ -75,10 +75,16 @@ func (p *parser) scalar() (datum.Value, error) {
 		return datum.Value{Kind: "bool"}, nil
 	}
 	n, err := strconv.ParseInt(t.text, 10, 64)
-	if err != nil {
-		return datum.Value{}, fmt.Errorf("SQL: invalid integer at byte %d", t.position)
+	if err == nil {
+		return datum.Integer(n), nil
 	}
-	return datum.Integer(n), nil
+	// A literal that is not an int64 may still be an exact decimal. It is
+	// parsed from its lexical form; no binary float is involved.
+	dec, decErr := datum.ParseDecimal(t.text)
+	if decErr != nil {
+		return datum.Value{}, fmt.Errorf("SQL: invalid numeric literal at byte %d: %s", t.position, decErr)
+	}
+	return datum.Value{Kind: "decimal", Dec: dec}, nil
 }
 func (p *parser) selectQuery() (query.Request, error) {
 	q := query.Request{}

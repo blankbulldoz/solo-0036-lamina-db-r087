@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bounded production walkthroughs using only the public HTTP service."""
-import argparse, concurrent.futures, json, os, pathlib, shutil, socket, subprocess, tempfile, time, urllib.request, urllib.error
-WORKFLOWS=['catalog-create','txn-write','snapshot-read','index-build','query-plan','sql-execute','txn-conflict','restart','checkpoint','backup-restore','changes','vacuum','transaction-close','statistics']
+import argparse, concurrent.futures, decimal, json, os, pathlib, shutil, socket, subprocess, tempfile, time, urllib.request, urllib.error
+WORKFLOWS=['catalog-create','txn-write','snapshot-read','index-build','query-plan','sql-execute','decimal-exact','txn-conflict','restart','checkpoint','backup-restore','changes','vacuum','transaction-close','statistics']
 class Session:
  def __init__(self,binary,root,restore=None):
   self.binary=str(binary);self.root=pathlib.Path(root);self.restore=restore;self.process=None;self.log=None
@@ -41,6 +41,11 @@ class Session:
 def require(condition,message):
  if not condition:raise RuntimeError(message)
 def tuple_(n,band=None,amplitude=None):return {'sample':n,'band':band or f'b{n}','amplitude':n*10 if amplitude is None else amplitude,'valid':True}
+def exact(value):
+ # Independent oracle: Python's Decimal is exact base-10 arithmetic and never
+ # passes through a binary float. This module deliberately runs with -I so no
+ # local file shadows the stdlib implementation.
+ return decimal.Decimal(value)
 def seed(s):
  schema={'name':'spectra','primary':'sample','columns':[{'name':'sample','type':'int'},{'name':'band','type':'text'},{'name':'amplitude','type':'int','nullable':True},{'name':'valid','type':'bool'}]}
  s.call('POST','/relations',schema,201)
@@ -93,6 +98,71 @@ def walkthrough(name,binary):
     total=s.call('POST','/sql',{'sql':'SELECT sum(amplitude) FROM spectra;'})
     require(count['rows']==[{'count':6}] and total['rows']==[{'sum':210}],'aggregate semantics wrong')
     s.call('POST','/sql',{'sql':'SELECT * FROM spectra; SELECT * FROM spectra;'},400);observations={'projection':sql['rows'],'count':count['rows'],'sum':total['rows']}
+   elif name=='decimal-exact':
+    schema={'name':'ledger','primary':'id','columns':[{'name':'id','type':'decimal','precision':10,'scale':2},{'name':'amount','type':'decimal','precision':18,'scale':4},{'name':'note','type':'text','nullable':True}]}
+    s.call('POST','/relations',schema,201)
+    tx=s.begin()
+    # The same identity written with different textual spellings; each pair
+    # must replace rather than add a row. Values come from quoted strings and
+    # raw JSON numbers, and none is ever converted to binary float.
+    for row in ({'id':'1.50','amount':'0.1000','note':'a'},{'id':'1.5','amount':'0.2','note':'b'},
+                {'id':'2.00','amount':0.3,'note':'c'},{'id':'2.000','amount':'0.4000','note':'d'},
+                {'id':'3.000','amount':'0.0005','note':'e'}):
+     s.call('POST',f'/transactions/{tx}/put',{'relation':'ledger','row':row})
+    s.commit(tx)
+    rows=s.call('POST','/query',{'relation':'ledger','order':[{'column':'id'}]})
+    require([r['id'] for r in rows['rows']]==['1.50','2.00','3.00'],'decimal identity merged or split rows')
+    require(rows['matched']==3,'decimal primary spellings were not one identity')
+    # Equality against a differently spelled literal must use the same fact.
+    eq=s.call('POST','/query',{'relation':'ledger','where':[{'column':'id','op':'=','value':'2.000000'}]})
+    require(eq['matched']==1 and eq['rows'][0]['note']=='d','decimal equality crossed spellings')
+    # Rounding is declared per column; reject is the default and never guesses.
+    s.call('POST','/relations',{'name':'rounding','primary':'k','columns':[{'name':'k','type':'int'},{'name':'rej','type':'decimal','precision':6,'scale':2,'nullable':True},{'name':'hev','type':'decimal','precision':6,'scale':2,'rounding':'half_even','nullable':True},{'name':'hup','type':'decimal','precision':6,'scale':2,'rounding':'half_up','nullable':True},{'name':'trc','type':'decimal','precision':6,'scale':2,'rounding':'truncate','nullable':True}]},201)
+    tx=s.begin()
+    s.call('POST',f'/transactions/{tx}/put',{'relation':'rounding','row':{'k':1,'rej':'1.235'}},400)
+    s.call('POST',f'/transactions/{tx}/put',{'relation':'rounding','row':{'k':1,'rej':'1.230','hev':'1.225','hup':'1.225','trc':'1.229'}})
+    s.call('POST',f'/transactions/{tx}/put',{'relation':'rounding','row':{'k':2,'rej':'1.000','hev':'1.235','hup':'1.235','trc':'-1.239'}})
+    s.commit(tx)
+    rounded=s.call('POST','/query',{'relation':'rounding','order':[{'column':'k'}]})['rows']
+    require([(r['hev'],r['hup'],r['trc']) for r in rounded]==[('1.22','1.23','1.22'),('1.24','1.24','-1.23')],'declared rounding not applied')
+    # A rounded carry that leaves the declared precision is an overflow, not a wider value.
+    s.call('POST','/relations',{'name':'narrow','primary':'k','columns':[{'name':'k','type':'int'},{'name':'v','type':'decimal','precision':3,'scale':2,'rounding':'half_up','nullable':True}]},201)
+    tx=s.begin();s.call('POST',f'/transactions/{tx}/put',{'relation':'narrow','row':{'k':1,'v':'9.999'}},400);s.call('POST',f'/transactions/{tx}/rollback')
+    # A decimal primary key owns its own exact identity; a rounding column that
+    # follows it must still apply its own declared policy rather than inherit
+    # the primary's exactness.
+    s.call('POST','/relations',{'name':'hybrid','primary':'k','columns':[{'name':'k','type':'decimal','precision':6,'scale':2},{'name':'v','type':'decimal','precision':6,'scale':2,'rounding':'half_up','nullable':True}]},201)
+    tx=s.begin();s.call('POST',f'/transactions/{tx}/put',{'relation':'hybrid','row':{'k':'1.00','v':'1.235'}});s.commit(tx)
+    hybrid=s.call('POST','/query',{'relation':'hybrid'})['rows']
+    require(hybrid==[{'k':'1.00','v':'1.24'}],'column after decimal primary lost its rounding policy')
+    # Aggregation is exact and agrees across SQL, structured query and an
+    # independent decimal oracle. Decimal sums render at the column scale.
+    values=[exact(r['amount']) for r in rows['rows']]
+    expected=format(sum(values,exact(0)),'f')
+    structured=s.call('POST','/query',{'relation':'ledger','aggregate':{'function':'sum','column':'amount'}})
+    sql=s.call('POST','/sql',{'sql':'SELECT sum(amount) FROM ledger;'})
+    require(structured['rows']==sql['rows'],'SQL and structured decimal sum diverged')
+    require(exact(structured['rows'][0]['sum'])==sum(values,exact(0)),'decimal sum lost precision')
+    require(structured['plan']==sql['plan'],'aggregate plan facts diverged')
+    # An exact index candidate set must match a forced scan over the same snapshot.
+    s.call('POST','/indexes',{'name':'by_amount','relation':'ledger','column':'amount'},201)
+    where=[{'column':'amount','op':'>=','value':'0.2000'}]
+    fast=s.call('POST','/query',{'relation':'ledger','where':where,'order':[{'column':'id'}]})
+    slow=s.call('POST','/query',{'relation':'ledger','where':where,'order':[{'column':'id'}],'force_scan':True})
+    require(fast['rows']==slow['rows'] and fast['plan']['access']=='index','decimal index/scan mismatch')
+    # Recovery and the portable backup must preserve the same facts.
+    before=s.call('POST','/query',{'relation':'ledger','order':[{'column':'id'}]})['rows']
+    s.call('POST','/checkpoint');s.stop();s.start()
+    require(s.call('POST','/query',{'relation':'ledger','order':[{'column':'id'}]})['rows']==before,'restart changed decimal facts')
+    recovered=s.call('POST','/query',{'relation':'ledger','aggregate':{'function':'sum','column':'amount'}})
+    require(exact(recovered['rows'][0]['sum'])==sum(values,exact(0)),'recovered decimal sum changed')
+    backup=s.call('GET','/backup',raw=True);path=temp/'ledger.lmi';path.write_bytes(backup)
+    other=Session(binary,temp/'decimal-restored',path).start()
+    require(other.call('POST','/query',{'relation':'ledger','order':[{'column':'id'}]})['rows']==before,'restored decimal facts changed')
+    # A decimal primary key may not declare a rounding policy: identity must
+    # not depend on which spelling happened to arrive first.
+    s.call('POST','/relations',{'name':'bad','primary':'id','columns':[{'name':'id','type':'decimal','precision':5,'scale':2,'rounding':'half_up'}]},400)
+    observations={'rows':before,'structured_sum':structured['rows'][0]['sum'],'sql_sum':sql['rows'][0]['sum'],'oracle_sum':expected,'rounded':rounded}
    elif name=='txn-conflict':
     a=s.begin();b=s.begin();s.put(a,tuple_(1,amplitude=101));s.put(b,tuple_(1,amplitude=202));s.put(b,tuple_(8))
     with concurrent.futures.ThreadPoolExecutor(2) as pool:

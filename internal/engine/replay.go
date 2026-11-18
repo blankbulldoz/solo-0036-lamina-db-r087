@@ -33,7 +33,8 @@ func (d *DB) apply(r journal.Record) error {
 		d.catalog.Indexes[r.Index.Name] = *r.Index
 	case "commit":
 		seen := map[string]bool{}
-		for _, m := range r.Writes {
+		for i := range r.Writes {
+			m := &r.Writes[i]
 			relation, err := d.catalog.Relation(m.Relation)
 			if err != nil {
 				return err
@@ -44,13 +45,17 @@ func (d *DB) apply(r journal.Record) error {
 			}
 			seen[token] = true
 			if !m.Deleted {
-				row, err := relation.Normalize(m.Row)
+				row, err := relation.NormalizeStored(m.Row)
 				if err != nil {
 					return err
 				}
 				if relation.Key(row) != m.Key {
 					return fmt.Errorf("stored primary mismatch")
 				}
+				// Durable JSON renders a decimal as its fixed textual form.
+				// Reinstalling the normalized row restores the typed value so
+				// replay, indexes and comparisons observe the same fact.
+				m.Row = row
 			}
 		}
 		d.store.Apply(r.Sequence, r.Writes)

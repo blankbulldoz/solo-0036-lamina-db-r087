@@ -35,7 +35,7 @@ func (d *DB) Query(q query.Request) (query.Result, error) {
 	if at < r.Created {
 		return query.Result{}, fault("snapshot", "relation did not exist at snapshot")
 	}
-	if err = query.Bind(r, q); err != nil {
+	if err = query.Bind(r, &q); err != nil {
 		return query.Result{}, invalid(err)
 	}
 	if tx != nil && len(tx.writes[q.Relation]) > 0 {
@@ -70,11 +70,11 @@ func (d *DB) Get(id, table string, key datum.Value) (datum.Row, error) {
 	if err != nil {
 		return nil, invalid(err)
 	}
-	col, _ := r.Column(r.Primary)
-	if key.Null() || key.Kind != col.Type {
-		return nil, fault("invalid", "invalid primary value")
+	keyValue, err := r.CoercePrimary(key)
+	if err != nil {
+		return nil, fault("invalid", "%s", err)
 	}
-	q.Where = []query.Predicate{{Column: r.Primary, Op: "=", Value: key}}
+	q.Where = []query.Predicate{{Column: r.Primary, Op: "=", Value: keyValue}}
 	result, err := d.Query(q)
 	if err != nil {
 		return nil, err
